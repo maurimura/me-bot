@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
 use serenity::client::{Client, Context, EventHandler};
 use serenity::framework::standard::{
     macros::{command, group},
     CommandResult, StandardFramework,
 };
-use serenity::model::channel::{self, ChannelType, Message, Reaction};
+use serenity::model::channel::{ChannelType, Message, Reaction};
 use serenity::model::id::GuildId;
 use serenity::model::prelude::Ready;
 
@@ -17,8 +16,8 @@ use dotenv::dotenv;
 #[commands(ping, echo, shop)]
 struct General;
 
-const SHOP_CHANNEL: &str = "shop";
-const STOCK_CHANNEL: &str = "stock";
+const SHOP_CHANNEL: &str = "🛒-shop";
+const STOCK_CHANNEL: &str = "📦-stock";
 struct Handler;
 
 impl Handler {
@@ -62,14 +61,16 @@ impl Shop for Handler {
                 .await
                 .unwrap();
 
-            for message in message_iter {
-                let (content, link) = (message.content.clone(), message.link());
-                stock_channel
-                    .send_message(ctx.clone(), |message| {
-                        message.embed(|embed| embed.title(content).url(link))
+            for mut message in message_iter {
+                let content = message.content.clone();
+                message
+                    .edit(ctx.clone(), |message| {
+                        message.content(format!("~~{}~~", content.clone()))
                     })
                     .await
                     .unwrap();
+
+                stock_channel.say(ctx.clone(), content).await.unwrap();
             }
         }
         // println!("NOT ADD: {:?}", reaction)
@@ -78,7 +79,7 @@ impl Shop for Handler {
 
 #[async_trait]
 trait Stock {
-    async fn consumed(&self, item: Reaction);
+    async fn consumed(&self, ctx: Context, item: Reaction);
     async fn buy(&self, item: Reaction);
 }
 
@@ -87,8 +88,53 @@ impl Stock for Handler {
     async fn buy(&self, message: Reaction) {
         println!("{:?}", message)
     }
-    async fn consumed(&self, message: Reaction) {
-        println!("{:?}", message)
+    async fn consumed(&self, ctx: Context, reaction: Reaction) {
+        let guild = reaction
+            .guild_id
+            .unwrap()
+            .to_guild_cached(ctx.clone())
+            .await
+            .unwrap();
+
+        let channel_id = reaction.channel_id;
+        let message_iter = channel_id
+            .messages(ctx.clone(), |retriver| {
+                retriver.around(reaction.message_id).limit(1)
+            })
+            .await
+            .unwrap();
+
+        for mut message in message_iter {
+            let current_content = message.content.clone();
+
+            if reaction.emoji.unicode_eq("✅") {
+                message
+                    .edit(ctx.clone(), |message| {
+                        message.content(format!("~~{}~~", current_content))
+                    })
+                    .await
+                    .unwrap()
+            }
+
+            if reaction.emoji.unicode_eq("♻️") {
+                message
+                    .edit(ctx.clone(), |message| {
+                        message.content(format!("~~{}~~", current_content.clone()))
+                    })
+                    .await
+                    .unwrap();
+
+                let shop_channel = guild
+                    .channel_id_from_name(ctx.clone(), SHOP_CHANNEL)
+                    .await
+                    .unwrap();
+
+                shop_channel
+                    .say(ctx.clone(), current_content)
+                    .await
+                    .unwrap();
+            }
+        }
     }
 }
 #[async_trait]
@@ -104,7 +150,7 @@ impl EventHandler for Handler {
         let name = guild_channel.name.as_str();
         match name {
             SHOP_CHANNEL => self.bought(ctx, added_reaction).await,
-            STOCK_CHANNEL => self.consumed(added_reaction).await,
+            STOCK_CHANNEL => self.consumed(ctx, added_reaction).await,
             _ => println!("{}", name),
         }
     }
@@ -143,7 +189,24 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn message(&self, _ctx: Context, msg: Message) {
+    async fn message(&self, ctx: Context, msg: Message) {
+        let guild_id = msg.guild_id.unwrap();
+        let guild = guild_id.to_guild_cached(ctx.clone()).await.unwrap();
+
+        let shop_channel_id = guild
+            .channel_id_from_name(ctx.clone(), SHOP_CHANNEL)
+            .await
+            .unwrap();
+        let message_channel_id = msg.channel_id;
+
+        if shop_channel_id == message_channel_id {
+            if !msg.is_own(ctx.clone()).await {
+                let content = msg.content.clone();
+                shop_channel_id.say(ctx.clone(), content).await.unwrap();
+                msg.delete(ctx).await.unwrap();
+            }
+        }
+
         match msg.clone().referenced_message {
             Some(referenced_message) => {
                 println!("{:?}", referenced_message);
@@ -162,8 +225,14 @@ async fn main() {
         .group(&GENERAL_GROUP);
 
     // Login with a bot token from the environment
-    let token = env::var("DISCORD_TOKEN").expect("token");
+    let token = env::var("DISCORD_TOKEN").expect("Missing DISCORD_TOKEN");
+    let application_id = env::var("APPLICATION_ID")
+        .expect("Missing APPLICATION_ID")
+        .parse::<u64>()
+        .unwrap();
+
     let mut client = Client::builder(token)
+        .application_id(application_id)
         .event_handler(Handler)
         .framework(framework)
         .await
